@@ -206,22 +206,24 @@ function setStatus(msg, ok = true, autoHide = true) {
         return;
       }
 
-      // 触发系统级验证弹窗 (Windows Hello / PIN)
-      // 注意：这里使用一个简单的挑战码来触发系统验证
+      // 触发系统级验证弹窗 (支持 Windows Hello / Mac Touch ID / PIN)
       const challenge = new Uint8Array(32);
       window.crypto.getRandomValues(challenge);
       
       const options = {
         publicKey: {
           challenge,
-          rp: { name: "SwiftFill" },
+          rp: { name: "SwiftFill (填表神器)" },
           user: {
             id: new Uint8Array(16),
             name: "user@swiftfill",
             displayName: "SwiftFill User"
           },
           pubKeyCredParams: [{ alg: -7, type: "public-key" }],
-          authenticatorSelection: { userVerification: "required" },
+          authenticatorSelection: { 
+            authenticatorAttachment: "platform", // 强制使用设备原生验证 (TouchID/WindowsHello)
+            userVerification: "required" 
+          },
           timeout: 60000
         }
       };
@@ -231,10 +233,15 @@ function setStatus(msg, ok = true, autoHide = true) {
       // 验证成功
       await chrome.storage.session.set({ unlocked: true });
       overlay.style.display = 'none';
-      setStatus('验证成功，已解锁', true);
+      setStatus('验证成功，欢迎回来', true);
     } catch (err) {
       console.error('Unlock failed:', err);
-      setStatus('验证取消或失败', false);
+      // 如果用户取消或不支持，提供一个通用的状态反馈
+      if (err.name === 'NotAllowedError') {
+        setStatus('验证被取消，请重试', false);
+      } else {
+        setStatus('系统验证不可用，请检查设备设置', false);
+      }
     }
   };
 
