@@ -123,7 +123,7 @@ function renderFields(fields, data) {
       fieldDiv.innerHTML = `
         <label style="display:flex;justify-content:space-between" title="自定义字段">
           <span>${key}</span>
-          <span class="delete-custom" data-key="${key}" style="cursor:pointer;color:var(--red);">删</span>
+          <span class="delete-custom" data-key="${key}" style="cursor:pointer;color:var(--red);" title="移除此字段">✖</span>
         </label>
         <input type="text" data-path="custom.${key}" value="${data.custom[key]}">
         <span class="copy-tip">已复制</span>
@@ -150,10 +150,10 @@ function bindEvents() {
       }
     };
     // Auto save on input
-    el.oninput = () => {
+    el.oninput = async () => {
       setVal(currentData, el.dataset.path, el.value);
-      saveData(currentData);
-      setStatus('自动保存中...', true, false);
+      await saveData(currentData);
+      setStatus('保存成功', true, true);
     };
   });
 
@@ -181,6 +181,72 @@ function setStatus(msg, ok = true, autoHide = true) {
 
 // Init
 (async () => {
+  const overlay = document.getElementById('lock-overlay');
+  const unlockBtn = document.getElementById('unlock-btn');
+
+  const checkLock = async () => {
+    const session = await chrome.storage.session.get('unlocked');
+    if (session.unlocked) {
+      overlay.style.display = 'none';
+      return true;
+    }
+    return false;
+  };
+
+  const requestUnlock = async () => {
+    try {
+      // 检查设备是否支持身份验证（如 Windows Hello）
+      const available = await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable();
+      if (!available) {
+        // 如果硬件不支持，回退到普通确认（或者您可以根据需要改为密码）
+        if (confirm('您的设备不支持生物识别，是否确认解锁并查看隐私数据？')) {
+          await chrome.storage.session.set({ unlocked: true });
+          overlay.style.display = 'none';
+        }
+        return;
+      }
+
+      // 触发系统级验证弹窗 (Windows Hello / PIN)
+      // 注意：这里使用一个简单的挑战码来触发系统验证
+      const challenge = new Uint8Array(32);
+      window.crypto.getRandomValues(challenge);
+      
+      const options = {
+        publicKey: {
+          challenge,
+          rp: { name: "SwiftFill" },
+          user: {
+            id: new Uint8Array(16),
+            name: "user@swiftfill",
+            displayName: "SwiftFill User"
+          },
+          pubKeyCredParams: [{ alg: -7, type: "public-key" }],
+          authenticatorSelection: { userVerification: "required" },
+          timeout: 60000
+        }
+      };
+
+      await navigator.credentials.create(options);
+      
+      // 验证成功
+      await chrome.storage.session.set({ unlocked: true });
+      overlay.style.display = 'none';
+      setStatus('验证成功，已解锁', true);
+    } catch (err) {
+      console.error('Unlock failed:', err);
+      setStatus('验证取消或失败', false);
+    }
+  };
+
+  unlockBtn.onclick = requestUnlock;
+
+  // 初始检查
+  const isUnlocked = await checkLock();
+  if (!isUnlocked) {
+    // 自动尝试触发一次（可选，或者等待点击）
+    // requestUnlock(); 
+  }
+
   const fields = await loadFields();
   const saved = await getData();
   currentData = saved || getInitialData(fields);
@@ -203,6 +269,20 @@ function setStatus(msg, ok = true, autoHide = true) {
         if (res) setTimeout(() => window.close(), 1000);
       });
     });
+  };
+
+  document.getElementById('do-show-widget').onclick = () => {
+    chrome.tabs.query({ active: true, currentWindow: true }, tabs => {
+      chrome.tabs.sendMessage(tabs[0].id, { action: 'show_widget' }, res => {
+        setStatus('已召唤悬浮球');
+        setTimeout(() => window.close(), 1000);
+      });
+    });
+  };
+
+  document.getElementById('do-save').onclick = async () => {
+    await saveData(currentData);
+    setStatus('已手动保存最新数据', true);
   };
 
   document.getElementById('add-custom').onclick = () => {

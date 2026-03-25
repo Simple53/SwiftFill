@@ -26,6 +26,12 @@ async function loadConfig() {
   FIELD_RULES = await res.json();
 }
 
+chrome.storage.onChanged.addListener((changes) => {
+  if (changes[STORAGE_KEY]) {
+    loadConfig().then(() => updateWidgetContent());
+  }
+});
+
 // --- 核心填充逻辑 ---
 function getNestedValue(obj, path) {
   return path.split('.').reduce((a, k) => a && a[k] !== undefined ? a[k] : null, obj);
@@ -96,10 +102,25 @@ function triggerGlobalFill(data) {
 chrome.runtime.onMessage.addListener((msg, sender, reply) => {
   if (msg.action === 'fill') {
     const count = triggerGlobalFill(msg.data);
+    // 同时也尝试显示悬浮球（如果由于某种原因不可见）
+    const container = document.getElementById('rf-exam-widget-container');
+    if (container) container.style.display = 'block';
+    
     document.querySelectorAll('iframe').forEach(ifr => {
       try { ifr.contentWindow.postMessage({ action: "rf_fill_all", data: msg.data }, "*"); } catch(e) {}
     });
     reply({ filled: count });
+  } else if (msg.action === 'show_widget') {
+    const container = document.getElementById('rf-exam-widget-container');
+    if (!container) {
+      // 容器丢失了，重置状态重新创建
+      shadowRoot = null; 
+      createWidget();
+    } else {
+      container.style.display = 'block';
+      updateWidgetContent();
+    }
+    reply({ status: 'ok' });
   }
 });
 
@@ -114,75 +135,122 @@ window.addEventListener("message", (event) => {
 
 // --- 悬浮球 UI (Shadow DOM) ---
 let shadowRoot = null;
-function createWidget() {
-  if (window.top !== window || shadowRoot) return;
-  const widgetContainer = document.createElement('div');
-  widgetContainer.id = 'rf-exam-widget-container';
-  widgetContainer.style.cssText = 'position:fixed; top:100px; right:20px; z-index:9999999;';
-  document.body.appendChild(widgetContainer);
 
-  shadowRoot = widgetContainer.attachShadow({ mode: 'open' });
+function createWidget() {
+  // 确保处于顶级窗口且还没有创建（或原容器已丢失）
+  if (window.top !== window) return;
+  
+  let widgetContainer = document.getElementById('rf-exam-widget-container');
+  if (widgetContainer && shadowRoot) return;
+
+  if (!widgetContainer) {
+    widgetContainer = document.createElement('div');
+    widgetContainer.id = 'rf-exam-widget-container';
+    widgetContainer.style.cssText = 'position:fixed; top:100px; right:20px; z-index:2147483647;';
+    document.body.appendChild(widgetContainer);
+  }
+
+  if (!shadowRoot) {
+    shadowRoot = widgetContainer.attachShadow({ mode: 'open' });
+  }
+
   shadowRoot.innerHTML = `
     <style>
-      #bubble {
-        width: 100px; height: 36px; background: #2563eb; color: #fff;
-        border-radius: 18px; cursor: move; display: flex; align-items: center; justify-content: center;
-        font-size: 13px; font-weight: bold; box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-        user-select: none; transition: transform 0.2s; border: 2px solid #fff;
+      :host {
+        --primary: #2563eb;
+        --bg: #ffffff;
+        --border: #e5e7eb;
+        --text: #111827;
+        --muted: #6b7280;
       }
-      #bubble:hover { transform: scale(1.05); }
-      #panel {
-        position: absolute; top: 40px; right: 0; width: 220px; background: #fff;
-        border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.2);
-        display: none; flex-direction: column; overflow: hidden; border: 1px solid #e5e7eb;
+      
+      .trigger-icon {
+        width: 48px; height: 48px; background: var(--primary); color: #fff;
+        border-radius: 50%; display: flex; align-items: center; justify-content: center;
+        box-shadow: 0 4px 12px rgba(37,99,235,0.3); cursor: move; user-select: none;
+        transition: transform 0.2s;
       }
-      #panel.open { display: flex; }
-      .header { padding: 12px; background: #f9fafb; border-bottom: 1px solid #e5e7eb; font-weight: bold; font-size: 12px; }
-      .list { max-height: 300px; overflow-y: auto; padding: 8px 0; }
+      .trigger-icon:hover { transform: scale(1.05); }
+      .trigger-icon svg { width: 24px; height: 24px; pointer-events: none; }
+
+      .panel {
+        width: 280px; max-height: 500px;
+        background: var(--bg); border: 1px solid var(--border); border-radius: 12px;
+        box-shadow: 0 10px 25px rgba(0,0,0,0.15); display: none; flex-direction: column;
+        overflow: hidden; font-family: -apple-system, sans-serif;
+        margin-top: 8px; position: absolute; right: 0;
+      }
+      .panel.open { display: flex; }
+
+      .panel-header {
+        padding: 12px 16px; background: #f9fafb; border-bottom: 1px solid var(--border);
+        display: flex; justify-content: space-between; align-items: center;
+      }
+      .panel-header h3 { margin: 0; font-size: 14px; font-weight: 600; color: var(--text); }
+      .close-panel { cursor: pointer; color: var(--muted); font-size: 14px; transition: color 0.2s;}
+      .close-panel:hover { color: #dc2626; }
+      
+      .panel-content {
+        padding: 12px; overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 8px;
+        background: #fafafa;
+      }
+      .panel-content::-webkit-scrollbar { width: 4px; }
+      .panel-content::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+
       .item {
-        padding: 8px 12px; cursor: pointer; display: flex; flex-direction: column; gap: 2px;
-        border-bottom: 1px solid #f3f4f6; position: relative;
+        padding: 8px 10px; background: #ffffff; border: 1px solid var(--border);
+        border-radius: 6px; cursor: move; transition: all 0.2s; position: relative;
+        box-shadow: 0 1px 2px rgba(0,0,0,0.05);
       }
-      .item:hover { background: #f9fafb; }
-      .item label { font-size: 10px; color: #6b7280; }
-      .item span { font-size: 12px; color: #111827; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .item:hover { border-color: var(--primary); background: #eff6ff; }
+      .item label { display: block; font-size: 10px; color: var(--muted); pointer-events: none; margin-bottom: 2px; }
+      .item span { display: block; font-size: 12px; color: var(--text); pointer-events: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      
+      .item.dragging { opacity: 0.5; border: 1px dashed var(--primary); }
+
       .copy-tip {
         position: absolute; right: 8px; top: 12px; font-size: 10px; color: #059669;
-        background: #d1fae5; padding: 2px 6px; border-radius: 4px; opacity: 0; transition: opacity 0.2s;
+        opacity: 0; transition: opacity 0.2s; background: #d1fae5; padding: 2px 6px; border-radius: 4px;
+        pointer-events: none;
       }
-      .footer { padding: 8px; border-top: 1px solid #e5e7eb; }
-      button {
-        width: 100%; padding: 8px; background: #2563eb; color: #fff; border: none;
-        border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: bold;
+
+      .panel-footer { padding: 10px; border-top: 1px solid var(--border); background: var(--bg); }
+      .btn-fill {
+        width: 100%; padding: 8px; background: var(--primary); color: #fff; border: none;
+        border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer; transition: background 0.2s;
       }
-      button:hover { background: #1d4ed8; }
+      .btn-fill:hover { background: #1d4ed8; }
     </style>
-    <div id="bubble" title="单击展开">✎ 填表神器 <span id="close-bubble" style="margin-left:4px;cursor:pointer;font-weight:normal;" title="隐藏悬浮球">×</span></div>
-    <div id="panel">
-      <div class="header" style="display:flex; justify-content:space-between">
-        <span>📋 个人资料 (点击复制)</span>
-        <span id="close-panel" style="cursor:pointer; padding:0 4px" title="收起面板">✖</span>
+
+    <div class="trigger-icon" id="trigger-icon" title="点击展开，拖动调整">
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><path d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>
+    </div>
+
+    <div class="panel" id="panel">
+      <div class="panel-header">
+        <h3>📋 填表数据</h3>
+        <span class="close-panel" id="close-panel" title="彻底关闭">✖</span>
       </div>
-      <div class="list" id="widget-list"></div>
-      <div class="footer">
-        <button id="widget-do-fill">一键填充当前页</button>
+      <div class="panel-content" id="widget-list"></div>
+      <div class="panel-footer">
+        <button class="btn-fill" id="widget-do-fill">一键智能填充</button>
       </div>
     </div>
   `;
 
-  const bubble = shadowRoot.getElementById('bubble');
+  const icon = shadowRoot.getElementById('trigger-icon');
   const panel = shadowRoot.getElementById('panel');
-  let isDragging = false, startX, startY, initialX, initialY;
+  let isDraggingIcon = false, startX, startY, initialX, initialY;
 
-  bubble.onmousedown = (e) => {
-    isDragging = false;
+  icon.onmousedown = (e) => {
+    isDraggingIcon = false;
     startX = e.clientX; startY = e.clientY;
     const rect = widgetContainer.getBoundingClientRect();
     initialX = rect.left; initialY = rect.top;
 
     const move = (me) => {
       if (Math.abs(me.clientX - startX) > 5 || Math.abs(me.clientY - startY) > 5) {
-        isDragging = true;
+        isDraggingIcon = true;
         widgetContainer.style.left = (initialX + (me.clientX - startX)) + 'px';
         widgetContainer.style.top = (initialY + (me.clientY - startY)) + 'px';
         widgetContainer.style.right = 'auto';
@@ -196,25 +264,29 @@ function createWidget() {
     document.addEventListener('mouseup', up);
   };
 
-  bubble.onclick = (e) => { 
-    if (!isDragging && e.target.id !== 'close-bubble') panel.classList.toggle('open'); 
+  icon.onclick = () => {
+    if (!isDraggingIcon) panel.classList.toggle('open');
   };
-  
-  shadowRoot.getElementById('close-bubble').onclick = (e) => {
+
+  shadowRoot.getElementById('close-panel').onclick = (e) => {
     e.stopPropagation();
     widgetContainer.style.display = 'none';
   };
 
-  shadowRoot.getElementById('close-panel').onclick = () => {
-    panel.classList.remove('open');
+  shadowRoot.getElementById('widget-do-fill').onclick = () => {
+    const count = triggerGlobalFill(cachedData);
+    alert(`填充了 ${count} 个字段`);
   };
 
-  panel.querySelector('#widget-do-fill').onclick = () => {
-    window.postMessage({ action: "rf_fill_all", data: cachedData }, "*");
-    const btn = panel.querySelector('#widget-do-fill');
-    btn.textContent = `已发送填充指令`;
-    setTimeout(() => { btn.textContent = '一键填充当前页'; }, 2000);
-  };
+  // 简单的拖拽排序逻辑
+  const list = shadowRoot.getElementById('widget-list');
+  list.addEventListener('dragover', e => {
+    e.preventDefault();
+    const draggingItem = shadowRoot.querySelector('.dragging');
+    const siblings = [...list.querySelectorAll('.item:not(.dragging)')];
+    const nextSibling = siblings.find(sibling => e.clientY <= sibling.getBoundingClientRect().top + sibling.getBoundingClientRect().height / 2);
+    list.insertBefore(draggingItem, nextSibling);
+  });
 
   updateWidgetContent();
 }
@@ -224,35 +296,42 @@ function updateWidgetContent() {
   const list = shadowRoot.querySelector('#widget-list');
   const items = [];
   
-  // 基础字段预览 (所有字段)
+  // 基础字段预览 - 只显示有值的
   FIELD_RULES.forEach(rule => {
     const val = cachedData ? getNestedValue(cachedData, rule.path) : '';
-    if (val) items.push({ label: rule.label, val: String(val) });
+    if (val && String(val).trim()) {
+      items.push({ label: rule.label || rule.keys[0], val: String(val) });
+    }
   });
 
-  // 自定义字段预览
+  // 自定义字段预览 - 只显示有值的
   if (cachedData && cachedData.custom) {
     Object.keys(cachedData.custom).forEach(key => {
-      items.push({ label: key, val: String(cachedData.custom[key]) });
+      const val = cachedData.custom[key];
+      if (val && String(val).trim()) {
+        items.push({ label: key, val: String(val) });
+      }
     });
   }
 
   list.innerHTML = items.map(item => `
-    <div class="item" data-val="${item.val.replace(/"/g, '&quot;')}">
+    <div class="item" draggable="true" data-val="${item.val.replace(/"/g, '&quot;')}">
       <label>${item.label}</label>
       <span>${item.val}</span>
       <div class="copy-tip">已复制</div>
     </div>
-  `).join('');
+  `).join('') || '<div style="text-align:center; color:#999; padding:20px; font-size:12px;">暂无数据，请在插件菜单中填写</div>';
 
   list.querySelectorAll('.item').forEach(el => {
-    el.onclick = () => {
+    el.onclick = (e) => {
       navigator.clipboard.writeText(el.dataset.val).then(() => {
         const tip = el.querySelector('.copy-tip');
         tip.style.opacity = '1';
         setTimeout(() => { tip.style.opacity = '0'; }, 1000);
       });
     };
+    el.addEventListener('dragstart', () => el.classList.add('dragging'));
+    el.addEventListener('dragend', () => el.classList.remove('dragging'));
   });
 }
 

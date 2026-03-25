@@ -34,7 +34,7 @@
   { "id": "edu_languageLevel", "label": "外语语种及其等级", "keys": ["外语语种", "外语等级", "language"], "path": "edu.languageLevel" },
   { "id": "edu_specialty", "label": "专长", "keys": ["专长", "specialty"], "path": "edu.specialty" },
   { "id": "detail_resumeText", "label": "考生简历", "keys": ["考生简历", "学习经历", "resume"], "path": "detail.resumeText", "multiline": true },
-  { "id": "detail_familyText", "label": "家庭成员", "keys": ["家庭成员及主要社会关系", "family"], "path": "detail.familyText", "multiline": true },
+  { "id": "detail_familyText", "label": "家庭成员及主要社会关系", "keys": ["家庭成员及主要社会关系", "family"], "path": "detail.familyText", "multiline": true },
   { "id": "detail_awards", "label": "奖惩情况", "keys": ["奖惩情况", "awards"], "path": "detail.awards", "multiline": true },
   { "id": "detail_research", "label": "科研成果", "keys": ["科研成果", "research"], "path": "detail.research", "multiline": true }
 ]
