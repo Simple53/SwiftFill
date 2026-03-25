@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "SwiftFill - 公考编考填表神器",
+  "version": "3.3",
+  "description": "一键填充公考、事业编报名表单，支持加密存储、Iframe穿透与自定义字段。",
+  "permissions": ["storage", "activeTab", "scripting"],
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": "icon.png"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "all_frames": true,
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["fields.json", "icon.png"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}
