@@ -33,12 +33,28 @@
 
 ---
 
+## 📦 打包与分发 (Releases)
+
+本插件已适配所有基于 Chromium 内核的浏览器（如 Chrome, Edge, Brave）。
+
+### 1. 自动打包 (推荐)
+如果您想发布新版本入 GitHub Release，可以直接运行以下 PowerShell 命令打包：
+```powershell
+Compress-Archive -Path '.\*' -DestinationPath '.\SwiftFill-v1.0.zip' -Force
+```
+
+### 2. 发布到商店
+- **Chrome / Edge**：直接上传打包好的 `.zip` 文件到开发者后台。
+- **Firefox**：将 `.zip` 后缀改为 `.xpi` 即可上传。
+
+---
+
 ## 📅 版本管理建议 (针对开发者)
 项目采用 Git 进行版本追踪。如果您已配置了远端仓库，可以使用以下命令推送：
 ```bash
 git add .
-git commit -m "feat: SwiftFill 全新架构升级"
-git push origin main
+git commit -m "feat: SwiftFill 全新架构升级并打包 v1.0"
+git push -u origin main -f
 ```
 
 ---
