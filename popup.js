@@ -232,6 +232,9 @@ function setStatus(msg, ok = true, autoHide = true) {
       
       // 验证成功
       await chrome.storage.session.set({ unlocked: true });
+      chrome.tabs.query({ active: true, currentWindow: true }, tabs => {
+        if(tabs[0]) chrome.tabs.sendMessage(tabs[0].id, {action: "unlocked_refresh"}).catch(()=>{});
+      });
       overlay.style.display = 'none';
       setStatus('验证成功，欢迎回来', true);
     } catch (err) {

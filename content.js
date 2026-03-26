@@ -28,7 +28,11 @@ async function loadConfig() {
 
 chrome.storage.onChanged.addListener((changes) => {
   if (changes[STORAGE_KEY]) {
-    loadConfig().then(() => updateWidgetContent());
+    loadConfig().then(() => {
+      chrome.runtime.sendMessage({ action: 'check_lock' }, (unlocked) => {
+        if (unlocked) updateWidgetContent();
+      });
+    });
   }
 });
 
@@ -121,6 +125,9 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
       updateWidgetContent();
     }
     reply({ status: 'ok' });
+  } else if (msg.action === 'unlocked_refresh') {
+    loadConfig().then(createWidget);
+    reply({ status: 'ok' });
   }
 });
 
@@ -139,23 +146,30 @@ let shadowRoot = null;
 function createWidget() {
   // 确保处于顶级窗口且还没有创建（或原容器已丢失）
   if (window.top !== window) return;
+
+  chrome.runtime.sendMessage({ action: 'check_lock' }, (unlocked) => {
+    if (!unlocked) return; // 未解锁时不注入或显示数据
+    
+    let widgetContainer = document.getElementById('rf-exam-widget-container');
+    if (widgetContainer && shadowRoot) {
+      widgetContainer.style.display = 'block';
+      updateWidgetContent();
+      return;
+    }
   
-  let widgetContainer = document.getElementById('rf-exam-widget-container');
-  if (widgetContainer && shadowRoot) return;
+    if (!widgetContainer) {
+      widgetContainer = document.createElement('div');
+      widgetContainer.id = 'rf-exam-widget-container';
+      widgetContainer.style.cssText = 'position:fixed; top:100px; right:20px; z-index:2147483647;';
+      document.body.appendChild(widgetContainer);
+    }
 
-  if (!widgetContainer) {
-    widgetContainer = document.createElement('div');
-    widgetContainer.id = 'rf-exam-widget-container';
-    widgetContainer.style.cssText = 'position:fixed; top:100px; right:20px; z-index:2147483647;';
-    document.body.appendChild(widgetContainer);
-  }
+    if (!shadowRoot) {
+      shadowRoot = widgetContainer.attachShadow({ mode: 'open' });
+    }
 
-  if (!shadowRoot) {
-    shadowRoot = widgetContainer.attachShadow({ mode: 'open' });
-  }
-
-  shadowRoot.innerHTML = `
-    <style>
+    shadowRoot.innerHTML = `
+      <style>
       :host {
         --primary: #2563eb;
         --bg: #ffffff;
@@ -164,14 +178,22 @@ function createWidget() {
         --muted: #6b7280;
       }
       
-      .trigger-icon {
-        width: 48px; height: 48px; background: var(--primary); color: #fff;
-        border-radius: 50%; display: flex; align-items: center; justify-content: center;
-        box-shadow: 0 4px 12px rgba(37,99,235,0.3); cursor: move; user-select: none;
-        transition: transform 0.2s;
-      }
-      .trigger-icon:hover { transform: scale(1.05); }
-      .trigger-icon svg { width: 24px; height: 24px; pointer-events: none; }
+        .trigger-icon {
+          width: 48px; height: 48px; background: var(--primary); color: #fff;
+          border-radius: 50%; display: flex; align-items: center; justify-content: center;
+          box-shadow: 0 4px 12px rgba(37,99,235,0.3); cursor: move; user-select: none;
+          transition: transform 0.2s; position: relative;
+        }
+        .trigger-icon:hover { transform: scale(1.05); }
+        .trigger-icon svg { width: 24px; height: 24px; pointer-events: none; }
+        
+        .hover-close {
+          display: none; position: absolute; top: -4px; right: -4px;
+          background: #dc2626; color: white; border-radius: 50%;
+          width: 20px; height: 20px; font-size: 11px; line-height: 20px; text-align: center;
+          cursor: pointer; box-shadow: 0 2px 4px rgba(220,38,38,0.3); pointer-events: auto;
+        }
+        .trigger-icon:hover .hover-close { display: block; }
 
       .panel {
         width: 280px; max-height: 500px;
@@ -222,9 +244,10 @@ function createWidget() {
       .btn-fill:hover { background: #1d4ed8; }
     </style>
 
-    <div class="trigger-icon" id="trigger-icon" title="点击展开，拖动调整">
-      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><path d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>
-    </div>
+      <div class="trigger-icon" id="trigger-icon" title="点击展开，拖动调整">
+        <span class="hover-close" id="hover-close" title="彻底关闭">✖</span>
+        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><path d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>
+      </div>
 
     <div class="panel" id="panel">
       <div class="panel-header">
@@ -259,13 +282,32 @@ function createWidget() {
     const up = () => {
       document.removeEventListener('mousemove', move);
       document.removeEventListener('mouseup', up);
+      
+      // Edge snapping logic
+      const rect = widgetContainer.getBoundingClientRect();
+      const centerX = rect.left + rect.width / 2;
+      const snapToLeft = centerX < window.innerWidth / 2;
+      
+      widgetContainer.style.transition = 'left 0.3s cubic-bezier(0.25, 1, 0.5, 1), right 0.3s cubic-bezier(0.25, 1, 0.5, 1)';
+      if (snapToLeft) {
+        widgetContainer.style.left = '0px';
+      } else {
+        widgetContainer.style.left = (window.innerWidth - widgetContainer.offsetWidth) + 'px';
+      }
+      setTimeout(() => { widgetContainer.style.transition = ''; }, 300);
     };
     document.addEventListener('mousemove', move);
     document.addEventListener('mouseup', up);
   };
 
-  icon.onclick = () => {
+  icon.onclick = (e) => {
+    if (e.target.id === 'hover-close') return;
     if (!isDraggingIcon) panel.classList.toggle('open');
+  };
+
+  shadowRoot.getElementById('hover-close').onclick = (e) => {
+    e.stopPropagation();
+    widgetContainer.style.display = 'none';
   };
 
   shadowRoot.getElementById('close-panel').onclick = (e) => {
@@ -288,7 +330,8 @@ function createWidget() {
     list.insertBefore(draggingItem, nextSibling);
   });
 
-  updateWidgetContent();
+    updateWidgetContent();
+  }); // End check_lock
 }
 
 function updateWidgetContent() {
@@ -335,4 +378,8 @@ function updateWidgetContent() {
   });
 }
 
-loadConfig().then(createWidget);
+loadConfig().then(() => {
+  chrome.runtime.sendMessage({ action: 'check_lock' }, (unlocked) => {
+    if (unlocked) createWidget();
+  });
+});
