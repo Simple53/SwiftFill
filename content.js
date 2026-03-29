@@ -178,22 +178,22 @@ function createWidget() {
         --muted: #6b7280;
       }
       
-        .trigger-icon {
-          width: 48px; height: 48px; background: var(--primary); color: #fff;
-          border-radius: 50%; display: flex; align-items: center; justify-content: center;
-          box-shadow: 0 4px 12px rgba(37,99,235,0.3); cursor: move; user-select: none;
-          transition: transform 0.2s; position: relative;
-        }
-        .trigger-icon:hover { transform: scale(1.05); }
-        .trigger-icon svg { width: 24px; height: 24px; pointer-events: none; }
-        
-        .hover-close {
-          display: none; position: absolute; top: -4px; right: -4px;
-          background: #dc2626; color: white; border-radius: 50%;
-          width: 20px; height: 20px; font-size: 11px; line-height: 20px; text-align: center;
-          cursor: pointer; box-shadow: 0 2px 4px rgba(220,38,38,0.3); pointer-events: auto;
-        }
-        .trigger-icon:hover .hover-close { display: block; }
+.trigger-icon {
+width: 36px; height: 36px; background: var(--primary); color: #fff;
+border-radius: 50%; display: flex; align-items: center; justify-content: center;
+box-shadow: 0 4px 12px rgba(37,99,235,0.3); cursor: move; user-select: none;
+transition: transform 0.2s; position: relative;
+}
+.trigger-icon:hover { transform: scale(1.05); }
+.trigger-icon svg { width: 18px; height: 18px; pointer-events: none; }
+
+.hover-close {
+display: none; position: absolute; top: -4px; right: -4px;
+background: transparent; color: #9ca3af; border-radius: 50%;
+width: 16px; height: 16px; font-size: 10px; line-height: 16px; text-align: center;
+cursor: pointer; pointer-events: auto;
+}
+.trigger-icon:hover .hover-close { display: block; }
 
       .panel {
         width: 280px; max-height: 500px;
@@ -274,8 +274,11 @@ function createWidget() {
     const move = (me) => {
       if (Math.abs(me.clientX - startX) > 5 || Math.abs(me.clientY - startY) > 5) {
         isDraggingIcon = true;
-        widgetContainer.style.left = (initialX + (me.clientX - startX)) + 'px';
-        widgetContainer.style.top = (initialY + (me.clientY - startY)) + 'px';
+        const margin = 10;
+        const newLeft = Math.min(Math.max(initialX + (me.clientX - startX), margin), window.innerWidth - widgetContainer.offsetWidth - margin);
+        const newTop  = Math.min(Math.max(initialY + (me.clientY - startY), margin), window.innerHeight - widgetContainer.offsetHeight - margin);
+        widgetContainer.style.left = newLeft + 'px';
+        widgetContainer.style.top  = newTop  + 'px';
         widgetContainer.style.right = 'auto';
       }
     };
@@ -283,17 +286,17 @@ function createWidget() {
       document.removeEventListener('mousemove', move);
       document.removeEventListener('mouseup', up);
       
-      // Edge snapping logic
+      // Edge snapping (only snap if within 100px of edge)
       const rect = widgetContainer.getBoundingClientRect();
-      const centerX = rect.left + rect.width / 2;
-      const snapToLeft = centerX < window.innerWidth / 2;
-      
-      widgetContainer.style.transition = 'left 0.3s cubic-bezier(0.25, 1, 0.5, 1), right 0.3s cubic-bezier(0.25, 1, 0.5, 1)';
-      if (snapToLeft) {
-        widgetContainer.style.left = '0px';
-      } else {
-        widgetContainer.style.left = (window.innerWidth - widgetContainer.offsetWidth) + 'px';
-      }
+      const T = 100; // threshold
+      const w = widgetContainer.offsetWidth;
+      const h = widgetContainer.offsetHeight;
+
+      widgetContainer.style.transition = 'left 0.3s cubic-bezier(0.25,1,0.5,1), top 0.3s cubic-bezier(0.25,1,0.5,1)';
+      if (rect.left < T)                             widgetContainer.style.left = '10px';
+else if (window.innerWidth - rect.right < T) widgetContainer.style.left = (window.innerWidth - w - 10) + 'px';
+      if (rect.top  < T)                             widgetContainer.style.top  = '10px';
+      else if (window.innerHeight - rect.bottom < T) widgetContainer.style.top  = (window.innerHeight - h) + 'px';
       setTimeout(() => { widgetContainer.style.transition = ''; }, 300);
     };
     document.addEventListener('mousemove', move);

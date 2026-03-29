@@ -4,10 +4,15 @@
   "version": "3.3",
   "description": "一键填充公考、事业编报名表单，支持加密存储、Iframe穿透与自定义字段。",
   "permissions": ["storage", "activeTab", "scripting"],
-  "action": {
-    "default_popup": "popup.html",
-    "default_icon": "icon.png"
-  },
+"action": {
+"default_popup": "popup.html",
+"default_icon": {
+"16": "icon_16.png",
+"32": "icon_32.png",
+"48": "icon_48.png",
+"128": "icon_128.png"
+}
+},
   "background": {
     "service_worker": "background.js"
   },
