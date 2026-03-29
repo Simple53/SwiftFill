@@ -93,28 +93,49 @@ function fillElement(el, path, data) {
 }
 
 function triggerGlobalFill(data) {
-  if (!data) return 0;
-  let filled = 0;
-  document.querySelectorAll('input, select, textarea').forEach(el => {
-    const path = matchField(el);
-    if (path && fillElement(el, path, data)) filled++;
-  });
-  return filled;
+if (!data) return 0;
+let filled = 0;
+document.querySelectorAll('input, select, textarea').forEach(el => {
+const path = matchField(el);
+if (path && fillElement(el, path, data)) filled++;
+});
+return filled;
+}
+
+function fillAllIframes(data, delay = 500) {
+const fillIframe = (ifr, retryCount = 0) => {
+try {
+ifr.contentWindow.postMessage({ action: "rf_fill_all", data: data }, "*");
+} catch(e) {}
+};
+const scanAndFill = () => {
+document.querySelectorAll('iframe').forEach(ifr => fillIframe(ifr));
+document.querySelectorAll('iframe').forEach(ifr => {
+try {
+ifr.contentWindow.document.querySelectorAll('iframe').forEach(innerIfr => {
+fillIframe(innerIfr);
+});
+} catch(e) {}
+});
+};
+scanAndFill();
+if (delay > 0) {
+setTimeout(scanAndFill, delay);
+setTimeout(scanAndFill, delay * 2);
+}
 }
 
 // --- 通信与 Iframe 穿透 ---
 chrome.runtime.onMessage.addListener((msg, sender, reply) => {
-  if (msg.action === 'fill') {
-    const count = triggerGlobalFill(msg.data);
-    // 同时也尝试显示悬浮球（如果由于某种原因不可见）
-    const container = document.getElementById('rf-exam-widget-container');
-    if (container) container.style.display = 'block';
-    
-    document.querySelectorAll('iframe').forEach(ifr => {
-      try { ifr.contentWindow.postMessage({ action: "rf_fill_all", data: msg.data }, "*"); } catch(e) {}
-    });
-    reply({ filled: count });
-  } else if (msg.action === 'show_widget') {
+if (msg.action === 'fill') {
+const count = triggerGlobalFill(msg.data);
+const container = document.getElementById('rf-exam-widget-container');
+if (container) container.style.display = 'block';
+
+fillAllIframes(msg.data, 800);
+
+reply({ filled: count });
+} else if (msg.action === 'show_widget') {
     const container = document.getElementById('rf-exam-widget-container');
     if (!container) {
       // 容器丢失了，重置状态重新创建
@@ -132,13 +153,47 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
 });
 
 window.addEventListener("message", (event) => {
-  if (event.data && event.data.action === "rf_fill_all") {
-    triggerGlobalFill(event.data.data || cachedData);
-    document.querySelectorAll('iframe').forEach(ifr => {
-      try { ifr.contentWindow.postMessage({ action: "rf_fill_all", data: event.data.data || cachedData }, "*"); } catch(e) {}
-    });
-  }
+if (event.data && event.data.action === "rf_fill_all") {
+triggerGlobalFill(event.data.data || cachedData);
+fillAllIframes(event.data.data || cachedData, 300);
+}
 });
+
+let pendingFillData = null;
+let fillTimeout = null;
+
+function scheduleFillForNewIframe(data) {
+pendingFillData = data;
+if (fillTimeout) clearTimeout(fillTimeout);
+fillTimeout = setTimeout(() => {
+if (pendingFillData) {
+fillAllIframes(pendingFillData, 0);
+pendingFillData = null;
+}
+}, 300);
+}
+
+const iframeObserver = new MutationObserver((mutations) => {
+let hasNewIframe = false;
+mutations.forEach((mutation) => {
+mutation.addedNodes.forEach((node) => {
+if (node.tagName === 'IFRAME' || (node.querySelectorAll && node.querySelectorAll('iframe').length > 0)) {
+hasNewIframe = true;
+}
+});
+});
+if (hasNewIframe && cachedData) {
+scheduleFillForNewIframe(cachedData);
+}
+});
+
+if (document.readyState === 'complete' || document.readyState === 'interactive') {
+iframeObserver.observe(document.body, { childList: true, subtree: true });
+} else {
+document.addEventListener('DOMContentLoaded', () => {
+iframeObserver.observe(document.body, { childList: true, subtree: true });
+});
+}
 
 // --- 悬浮球 UI (Shadow DOM) ---
 let shadowRoot = null;
