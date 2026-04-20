@@ -1,8 +1,8 @@
-{
+﻿{
   "manifest_version": 3,
-  "name": "SwiftFill - 公考编考填表神器",
-  "version": "3.3",
-  "description": "一键填充公考、事业编报名表单，支持加密存储、Iframe穿透与自定义字段。",
+  "name": "SwiftFill - 鍏€冪紪鑰冨～琛ㄧ鍣?,
+  "version": "2.0",
+  "description": "涓€閿～鍏呭叕鑰冦€佷簨涓氱紪鎶ュ悕琛ㄥ崟锛屾敮鎸佸姞瀵嗗瓨鍌ㄣ€両frame绌块€忎笌鑷畾涔夊瓧娈点€?,
   "permissions": ["storage", "activeTab", "scripting"],
 "action": {
 "default_popup": "popup.html",
@@ -31,3 +31,4 @@
     }
   ]
 }
+

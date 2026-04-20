@@ -1,76 +1,80 @@
-// --- 配置与配置加载 ---
 const STORAGE_KEY = 'rf_exam_v3_enc';
 const SALT = 'rf-ext-salt-exam';
+const WIDGET_MARGIN = 12;
+const PANEL_GAP = 10;
+const PANEL_FALLBACK_HEIGHT = 320;
+
 let cachedData = null;
 let FIELD_RULES = [];
+let shadowRoot = null;
+let widgetDismissed = false;
+let widgetDock = { horizontal: 'right', vertical: 'top' };
+let pendingFillData = null;
+let fillTimeout = null;
+let observedFrames = new WeakSet();
 
-// 加密/解密
 function decryptData(encObj) {
   if (!encObj || !encObj.payload) return null;
   try {
     const dec = atob(encObj.payload);
-    let text = "";
-    for(let i = 0; i < dec.length; i++) {
-        text += String.fromCharCode(dec.charCodeAt(i) ^ SALT.charCodeAt(i % SALT.length));
+    let text = '';
+    for (let i = 0; i < dec.length; i++) {
+      text += String.fromCharCode(dec.charCodeAt(i) ^ SALT.charCodeAt(i % SALT.length));
     }
     return JSON.parse(decodeURIComponent(text));
-  } catch(e) { return null; }
+  } catch (e) {
+    return null;
+  }
 }
 
 async function loadConfig() {
-  const r = await chrome.storage.local.get(STORAGE_KEY);
-  if (r[STORAGE_KEY]) {
-    cachedData = decryptData(JSON.parse(r[STORAGE_KEY]));
+  const result = await chrome.storage.local.get(STORAGE_KEY);
+  if (result[STORAGE_KEY]) {
+    cachedData = decryptData(JSON.parse(result[STORAGE_KEY]));
   }
   const res = await fetch(chrome.runtime.getURL('fields.json'));
   FIELD_RULES = await res.json();
 }
 
 chrome.storage.onChanged.addListener((changes) => {
-  if (changes[STORAGE_KEY]) {
-    loadConfig().then(() => {
-      chrome.runtime.sendMessage({ action: 'check_lock' }, (unlocked) => {
-        if (unlocked) updateWidgetContent();
-      });
+  if (!changes[STORAGE_KEY]) return;
+  loadConfig().then(() => {
+    chrome.runtime.sendMessage({ action: 'check_lock' }, (unlocked) => {
+      if (unlocked) updateWidgetContent();
     });
-  }
+  });
 });
 
-// --- 核心填充逻辑 ---
 function getNestedValue(obj, path) {
-  return path.split('.').reduce((a, k) => a && a[k] !== undefined ? a[k] : null, obj);
+  return path.split('.').reduce((acc, key) => (acc && acc[key] !== undefined ? acc[key] : null), obj);
 }
 
 function matchField(el) {
-  const container = el.closest('div, td, li, tr') || document.body;
   const labels = [];
-  
-  // 1. 找兄弟节点文字
-  if (el.previousElementSibling) labels.push(el.previousElementSibling.innerText);
-  
-  // 2. 向上找容器内的标签文字 (阻断机制：如果发现容器内有多个输入项，则停止向上搜素)
+  if (el.previousElementSibling) labels.push(el.previousElementSibling.innerText || '');
+
   let curr = el.parentElement;
   let depth = 0;
   while (curr && curr !== document.body && depth < 3) {
     const inputs = curr.querySelectorAll('input, select, textarea');
-    if (inputs.length > 1) break; // 发现复合容器，停止寻找标签防止内容重复
-    labels.push(curr.innerText);
+    if (inputs.length > 1) break;
+    labels.push(curr.innerText || '');
     curr = curr.parentElement;
     depth++;
   }
-  
+
   const text = labels.join(' ').replace(/\s+/g, ' ');
 
-  // 匹配逻辑
   for (const rule of FIELD_RULES) {
-    if (rule.keys.some(k => new RegExp(k, 'i').test(text))) return rule.path;
+    if (rule.keys.some((key) => new RegExp(key, 'i').test(text))) return rule.path;
   }
-  // 匹配自定义字段
+
   if (cachedData && cachedData.custom) {
     for (const key of Object.keys(cachedData.custom)) {
       if (text.includes(key)) return `custom.${key}`;
     }
   }
+
   return null;
 }
 
@@ -79,143 +83,259 @@ function fillElement(el, path, data) {
   if (val === null || val === undefined || val === '') return false;
 
   if (el.type === 'checkbox' || el.type === 'radio') {
-    const shouldBeChecked = String(val).includes('是') || String(val).includes('1') || String(val).includes('男') || String(val).includes('女');
+    const boolLike = ['是', '1', 'true', '男', '有'];
+    const shouldBeChecked = boolLike.some((flag) => String(val).includes(flag));
     if (el.checked !== shouldBeChecked) {
-      el.click(); // 触发框架事件
+      el.click();
       el.checked = shouldBeChecked;
     }
-  } else {
-    el.value = val;
-    el.dispatchEvent(new Event('input', { bubbles: true }));
-    el.dispatchEvent(new Event('change', { bubbles: true }));
+    return true;
   }
+
+  el.value = val;
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+  el.dispatchEvent(new Event('change', { bubbles: true }));
   return true;
 }
 
 function triggerGlobalFill(data) {
-if (!data) return 0;
-let filled = 0;
-document.querySelectorAll('input, select, textarea').forEach(el => {
-const path = matchField(el);
-if (path && fillElement(el, path, data)) filled++;
-});
-return filled;
+  if (!data) return 0;
+  let filled = 0;
+  document.querySelectorAll('input, select, textarea').forEach((el) => {
+    const path = matchField(el);
+    if (path && fillElement(el, path, data)) filled++;
+  });
+  return filled;
+}
+
+function attachFrameLoadListener(frame) {
+  if (!frame || observedFrames.has(frame)) return;
+  observedFrames.add(frame);
+  frame.addEventListener('load', () => {
+    if (!cachedData) return;
+    scheduleFillForNewIframe(cachedData);
+  }, true);
+}
+
+function broadcastFillToFrame(frame, data, visited) {
+  if (!frame) return;
+  attachFrameLoadListener(frame);
+
+  let frameWindow;
+  try {
+    frameWindow = frame.contentWindow;
+  } catch (e) {
+    return;
+  }
+
+  if (!frameWindow || visited.has(frameWindow)) return;
+  visited.add(frameWindow);
+
+  try {
+    frameWindow.postMessage({ action: 'rf_fill_all', data }, '*');
+  } catch (e) {}
+
+  try {
+    frameWindow.document.querySelectorAll('iframe').forEach((childFrame) => {
+      broadcastFillToFrame(childFrame, data, visited);
+    });
+  } catch (e) {}
+}
+
+function scanAndBroadcastFrames(data) {
+  const visited = new WeakSet();
+  visited.add(window);
+  document.querySelectorAll('iframe').forEach((frame) => {
+    broadcastFillToFrame(frame, data, visited);
+  });
 }
 
 function fillAllIframes(data, delay = 500) {
-const fillIframe = (ifr, retryCount = 0) => {
-try {
-ifr.contentWindow.postMessage({ action: "rf_fill_all", data: data }, "*");
-} catch(e) {}
-};
-const scanAndFill = () => {
-document.querySelectorAll('iframe').forEach(ifr => fillIframe(ifr));
-document.querySelectorAll('iframe').forEach(ifr => {
-try {
-ifr.contentWindow.document.querySelectorAll('iframe').forEach(innerIfr => {
-fillIframe(innerIfr);
-});
-} catch(e) {}
-});
-};
-scanAndFill();
-if (delay > 0) {
-setTimeout(scanAndFill, delay);
-setTimeout(scanAndFill, delay * 2);
-}
+  if (!data) return;
+  const delays = [0, 120, delay, delay * 2, delay * 3].filter((value, index, arr) => value >= 0 && arr.indexOf(value) === index);
+  delays.forEach((timeout) => {
+    setTimeout(() => {
+      scanAndBroadcastFrames(data);
+    }, timeout);
+  });
 }
 
-// --- 通信与 Iframe 穿透 ---
+function scheduleFillForNewIframe(data) {
+  pendingFillData = data;
+  if (fillTimeout) clearTimeout(fillTimeout);
+  fillTimeout = setTimeout(() => {
+    if (!pendingFillData) return;
+    fillAllIframes(pendingFillData, 300);
+    pendingFillData = null;
+  }, 220);
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, reply) => {
-if (msg.action === 'fill') {
-const count = triggerGlobalFill(msg.data);
-const container = document.getElementById('rf-exam-widget-container');
-if (container) container.style.display = 'block';
+  if (msg.action === 'fill') {
+    const count = triggerGlobalFill(msg.data);
+    const container = document.getElementById('rf-exam-widget-container');
+    if (container && !widgetDismissed) container.style.display = 'block';
+    fillAllIframes(msg.data, 700);
+    reply({ filled: count });
+    return;
+  }
 
-fillAllIframes(msg.data, 800);
-
-reply({ filled: count });
-} else if (msg.action === 'show_widget') {
+  if (msg.action === 'show_widget') {
+    if (widgetDismissed) {
+      reply({ status: 'dismissed' });
+      return;
+    }
     const container = document.getElementById('rf-exam-widget-container');
     if (!container) {
-      // 容器丢失了，重置状态重新创建
-      shadowRoot = null; 
+      shadowRoot = null;
       createWidget();
     } else {
       container.style.display = 'block';
       updateWidgetContent();
     }
     reply({ status: 'ok' });
-  } else if (msg.action === 'unlocked_refresh') {
-    loadConfig().then(createWidget);
+    return;
+  }
+
+  if (msg.action === 'unlocked_refresh') {
+    if (!widgetDismissed) loadConfig().then(createWidget);
     reply({ status: 'ok' });
   }
 });
 
-window.addEventListener("message", (event) => {
-if (event.data && event.data.action === "rf_fill_all") {
-triggerGlobalFill(event.data.data || cachedData);
-fillAllIframes(event.data.data || cachedData, 300);
-}
+window.addEventListener('message', (event) => {
+  if (!event.data || event.data.action !== 'rf_fill_all') return;
+  const fillData = event.data.data || cachedData;
+  triggerGlobalFill(fillData);
+  fillAllIframes(fillData, 300);
 });
-
-let pendingFillData = null;
-let fillTimeout = null;
-
-function scheduleFillForNewIframe(data) {
-pendingFillData = data;
-if (fillTimeout) clearTimeout(fillTimeout);
-fillTimeout = setTimeout(() => {
-if (pendingFillData) {
-fillAllIframes(pendingFillData, 0);
-pendingFillData = null;
-}
-}, 300);
-}
 
 const iframeObserver = new MutationObserver((mutations) => {
-let hasNewIframe = false;
-mutations.forEach((mutation) => {
-mutation.addedNodes.forEach((node) => {
-if (node.tagName === 'IFRAME' || (node.querySelectorAll && node.querySelectorAll('iframe').length > 0)) {
-hasNewIframe = true;
+  let hasNewIframe = false;
+  mutations.forEach((mutation) => {
+    mutation.addedNodes.forEach((node) => {
+      if (node.tagName === 'IFRAME') {
+        attachFrameLoadListener(node);
+        hasNewIframe = true;
+        return;
+      }
+      if (node.querySelectorAll) {
+        const frames = node.querySelectorAll('iframe');
+        if (frames.length) {
+          frames.forEach((frame) => attachFrameLoadListener(frame));
+          hasNewIframe = true;
+        }
+      }
+    });
+  });
+  if (hasNewIframe && cachedData) scheduleFillForNewIframe(cachedData);
+});
+
+function startIframeObservation() {
+  document.querySelectorAll('iframe').forEach((frame) => attachFrameLoadListener(frame));
+  iframeObserver.observe(document.body, { childList: true, subtree: true });
 }
-});
-});
-if (hasNewIframe && cachedData) {
-scheduleFillForNewIframe(cachedData);
-}
-});
 
 if (document.readyState === 'complete' || document.readyState === 'interactive') {
-iframeObserver.observe(document.body, { childList: true, subtree: true });
+  startIframeObservation();
 } else {
-document.addEventListener('DOMContentLoaded', () => {
-iframeObserver.observe(document.body, { childList: true, subtree: true });
-});
+  document.addEventListener('DOMContentLoaded', startIframeObservation);
 }
 
-// --- 悬浮球 UI (Shadow DOM) ---
-let shadowRoot = null;
+function clamp(value, min, max) {
+  return Math.min(Math.max(value, min), max);
+}
+
+function syncWidgetDock(widgetContainer) {
+  const rect = widgetContainer.getBoundingClientRect();
+  widgetDock = {
+    horizontal: rect.left + rect.width / 2 <= window.innerWidth / 2 ? 'left' : 'right',
+    vertical: rect.top + rect.height / 2 <= window.innerHeight / 2 ? 'top' : 'bottom'
+  };
+}
+
+function snapWidgetToViewport(widgetContainer, animate = false) {
+  const rect = widgetContainer.getBoundingClientRect();
+  const width = rect.width || widgetContainer.offsetWidth || 40;
+  const height = rect.height || widgetContainer.offsetHeight || 40;
+  const threshold = 100;
+
+  let left = clamp(rect.left, WIDGET_MARGIN, window.innerWidth - width - WIDGET_MARGIN);
+  let top = clamp(rect.top, WIDGET_MARGIN, window.innerHeight - height - WIDGET_MARGIN);
+
+  if (left <= threshold) left = WIDGET_MARGIN;
+  else if (window.innerWidth - (left + width) <= threshold) left = window.innerWidth - width - WIDGET_MARGIN;
+
+  if (top <= threshold) top = WIDGET_MARGIN;
+  else if (window.innerHeight - (top + height) <= threshold) top = window.innerHeight - height - WIDGET_MARGIN;
+
+  widgetContainer.style.transition = animate ? 'left 0.3s cubic-bezier(0.25,1,0.5,1), top 0.3s cubic-bezier(0.25,1,0.5,1)' : '';
+  widgetContainer.style.left = `${left}px`;
+  widgetContainer.style.top = `${top}px`;
+  widgetContainer.style.right = 'auto';
+  widgetContainer.style.bottom = 'auto';
+  syncWidgetDock(widgetContainer);
+
+  if (animate) {
+    setTimeout(() => {
+      widgetContainer.style.transition = '';
+    }, 300);
+  }
+}
+
+function applyPanelPlacement(widgetContainer, panel) {
+  panel.style.left = '0';
+  panel.style.top = '0';
+  panel.style.right = 'auto';
+  panel.style.bottom = 'auto';
+
+  const iconRect = widgetContainer.getBoundingClientRect();
+  const panelWidth = panel.offsetWidth || 280;
+  const panelHeight = panel.offsetHeight || PANEL_FALLBACK_HEIGHT;
+  const rightSpace = window.innerWidth - iconRect.right;
+  const leftSpace = iconRect.left;
+  const bottomSpace = window.innerHeight - iconRect.bottom;
+  const topSpace = iconRect.top;
+
+  const openToRight = widgetDock.horizontal === 'left' || (rightSpace >= panelWidth + PANEL_GAP && rightSpace >= leftSpace);
+  const openDown = widgetDock.vertical === 'top' || (bottomSpace >= panelHeight + PANEL_GAP && bottomSpace >= topSpace);
+
+  let left = openToRight ? iconRect.width + PANEL_GAP : -(panelWidth + PANEL_GAP);
+  let top = openDown ? 0 : iconRect.height - panelHeight;
+
+  const nextLeft = iconRect.left + left;
+  const nextTop = iconRect.top + top;
+  left += clamp(nextLeft, WIDGET_MARGIN, window.innerWidth - panelWidth - WIDGET_MARGIN) - nextLeft;
+  top += clamp(nextTop, WIDGET_MARGIN, window.innerHeight - panelHeight - WIDGET_MARGIN) - nextTop;
+
+  panel.style.left = `${left}px`;
+  panel.style.top = `${top}px`;
+}
+
+function hideWidgetForTab(widgetContainer, panel) {
+  widgetDismissed = true;
+  if (panel) panel.classList.remove('open');
+  if (widgetContainer) widgetContainer.style.display = 'none';
+}
 
 function createWidget() {
-  // 确保处于顶级窗口且还没有创建（或原容器已丢失）
-  if (window.top !== window) return;
+  if (window.top !== window || widgetDismissed) return;
 
   chrome.runtime.sendMessage({ action: 'check_lock' }, (unlocked) => {
-    if (!unlocked) return; // 未解锁时不注入或显示数据
-    
+    if (!unlocked) return;
+
     let widgetContainer = document.getElementById('rf-exam-widget-container');
     if (widgetContainer && shadowRoot) {
       widgetContainer.style.display = 'block';
+      snapWidgetToViewport(widgetContainer);
       updateWidgetContent();
       return;
     }
-  
+
     if (!widgetContainer) {
       widgetContainer = document.createElement('div');
       widgetContainer.id = 'rf-exam-widget-container';
-      widgetContainer.style.cssText = 'position:fixed; top:100px; right:20px; z-index:2147483647;';
+      widgetContainer.style.cssText = `position:fixed; top:100px; left:${Math.max(WIDGET_MARGIN, window.innerWidth - 56)}px; z-index:2147483647;`;
       document.body.appendChild(widgetContainer);
     }
 
@@ -225,210 +345,317 @@ function createWidget() {
 
     shadowRoot.innerHTML = `
       <style>
-      :host {
-        --primary: #2563eb;
-        --bg: #ffffff;
-        --border: #e5e7eb;
-        --text: #111827;
-        --muted: #6b7280;
-      }
-      
-.trigger-icon {
-width: 36px; height: 36px; background: var(--primary); color: #fff;
-border-radius: 50%; display: flex; align-items: center; justify-content: center;
-box-shadow: 0 4px 12px rgba(37,99,235,0.3); cursor: move; user-select: none;
-transition: transform 0.2s; position: relative;
-}
-.trigger-icon:hover { transform: scale(1.05); }
-.trigger-icon svg { width: 18px; height: 18px; pointer-events: none; }
-
-.hover-close {
-display: none; position: absolute; top: -4px; right: -4px;
-background: transparent; color: #9ca3af; border-radius: 50%;
-width: 16px; height: 16px; font-size: 10px; line-height: 16px; text-align: center;
-cursor: pointer; pointer-events: auto;
-}
-.trigger-icon:hover .hover-close { display: block; }
-
-      .panel {
-        width: 280px; max-height: 500px;
-        background: var(--bg); border: 1px solid var(--border); border-radius: 12px;
-        box-shadow: 0 10px 25px rgba(0,0,0,0.15); display: none; flex-direction: column;
-        overflow: hidden; font-family: -apple-system, sans-serif;
-        margin-top: 8px; position: absolute; right: 0;
-      }
-      .panel.open { display: flex; }
-
-      .panel-header {
-        padding: 12px 16px; background: #f9fafb; border-bottom: 1px solid var(--border);
-        display: flex; justify-content: space-between; align-items: center;
-      }
-      .panel-header h3 { margin: 0; font-size: 14px; font-weight: 600; color: var(--text); }
-      .close-panel { cursor: pointer; color: var(--muted); font-size: 14px; transition: color 0.2s;}
-      .close-panel:hover { color: #dc2626; }
-      
-      .panel-content {
-        padding: 12px; overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 8px;
-        background: #fafafa;
-      }
-      .panel-content::-webkit-scrollbar { width: 4px; }
-      .panel-content::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
-
-      .item {
-        padding: 8px 10px; background: #ffffff; border: 1px solid var(--border);
-        border-radius: 6px; cursor: move; transition: all 0.2s; position: relative;
-        box-shadow: 0 1px 2px rgba(0,0,0,0.05);
-      }
-      .item:hover { border-color: var(--primary); background: #eff6ff; }
-      .item label { display: block; font-size: 10px; color: var(--muted); pointer-events: none; margin-bottom: 2px; }
-      .item span { display: block; font-size: 12px; color: var(--text); pointer-events: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-      
-      .item.dragging { opacity: 0.5; border: 1px dashed var(--primary); }
-
-      .copy-tip {
-        position: absolute; right: 8px; top: 12px; font-size: 10px; color: #059669;
-        opacity: 0; transition: opacity 0.2s; background: #d1fae5; padding: 2px 6px; border-radius: 4px;
-        pointer-events: none;
-      }
-
-      .panel-footer { padding: 10px; border-top: 1px solid var(--border); background: var(--bg); }
-      .btn-fill {
-        width: 100%; padding: 8px; background: var(--primary); color: #fff; border: none;
-        border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer; transition: background 0.2s;
-      }
-      .btn-fill:hover { background: #1d4ed8; }
-    </style>
-
+        :host {
+          --primary: #ed6a2f;
+          --primary-soft: #fff2eb;
+          --bg: #fffdfa;
+          --border: #f1d3c4;
+          --text: #30211a;
+          --muted: #8c6c60;
+        }
+        .trigger-icon {
+          width: 40px;
+          height: 40px;
+          background: #ed6a2f;
+          color: #fff;
+          border-radius: 12px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          box-shadow: 0 8px 18px rgba(237,106,47,0.18);
+          cursor: move;
+          user-select: none;
+          transition: transform 0.18s ease, box-shadow 0.18s ease;
+          position: relative;
+          border: 1px solid #e56128;
+        }
+        .trigger-icon:hover {
+          transform: translateY(-1px);
+          box-shadow: 0 12px 22px rgba(237,106,47,0.24);
+        }
+        .trigger-icon svg {
+          width: 21px;
+          height: 21px;
+          pointer-events: none;
+        }
+        .hover-close {
+          display: none;
+          position: absolute;
+          top: -6px;
+          right: -6px;
+          background: #fff;
+          color: #8c6c60;
+          border-radius: 999px;
+          width: 18px;
+          height: 18px;
+          font-size: 11px;
+          line-height: 18px;
+          text-align: center;
+          cursor: pointer;
+          pointer-events: auto;
+          border: 1px solid #efd8cb;
+          box-shadow: 0 2px 8px rgba(72,38,19,0.12);
+        }
+        .trigger-icon:hover .hover-close { display: block; }
+        .panel {
+          width: 280px;
+          max-height: 500px;
+          background: var(--bg);
+          border: 1px solid var(--border);
+          border-radius: 16px;
+          box-shadow: 0 18px 38px rgba(89,45,24,0.14);
+          display: none;
+          flex-direction: column;
+          overflow: hidden;
+          font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+          position: absolute;
+        }
+        .panel.open { display: flex; }
+        .panel-header {
+          padding: 12px 16px;
+          background: #fff5ef;
+          border-bottom: 1px solid var(--border);
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+        }
+        .panel-header h3 {
+          margin: 0;
+          font-size: 14px;
+          font-weight: 600;
+          color: var(--text);
+        }
+        .close-panel {
+          cursor: pointer;
+          color: var(--muted);
+          font-size: 14px;
+          transition: color 0.2s;
+        }
+        .close-panel:hover { color: #dc5a23; }
+        .panel-content {
+          padding: 12px;
+          overflow-y: auto;
+          flex: 1;
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+          background: #fffdfa;
+        }
+        .panel-content::-webkit-scrollbar { width: 4px; }
+        .panel-content::-webkit-scrollbar-thumb {
+          background: #ead6cb;
+          border-radius: 4px;
+        }
+        .item {
+          padding: 8px 10px;
+          background: #fff;
+          border: 1px solid var(--border);
+          border-radius: 8px;
+          cursor: move;
+          transition: all 0.2s;
+          position: relative;
+          box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+        }
+        .item:hover {
+          border-color: #eeae8d;
+          background: #fff3ec;
+        }
+        .item label {
+          display: block;
+          font-size: 10px;
+          color: var(--muted);
+          pointer-events: none;
+          margin-bottom: 2px;
+        }
+        .item span {
+          display: block;
+          font-size: 12px;
+          color: var(--text);
+          pointer-events: none;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .item.dragging {
+          opacity: 0.5;
+          border: 1px dashed var(--primary);
+        }
+        .copy-tip {
+          position: absolute;
+          right: 8px;
+          top: 12px;
+          font-size: 10px;
+          color: #0f8a5b;
+          opacity: 0;
+          transition: opacity 0.2s;
+          background: #dff8ee;
+          padding: 2px 6px;
+          border-radius: 4px;
+          pointer-events: none;
+        }
+        .panel-footer {
+          padding: 10px;
+          border-top: 1px solid var(--border);
+          background: var(--bg);
+        }
+        .btn-fill {
+          width: 100%;
+          padding: 9px 10px;
+          background: #ed6a2f;
+          color: #fff;
+          border: none;
+          border-radius: 10px;
+          font-size: 12px;
+          font-weight: 700;
+          cursor: pointer;
+          transition: transform 0.18s ease, box-shadow 0.18s ease, background 0.18s ease;
+          box-shadow: 0 10px 18px rgba(237,106,47,0.18);
+        }
+        .btn-fill:hover {
+          transform: translateY(-1px);
+          background: #df5e24;
+          box-shadow: 0 14px 22px rgba(237,106,47,0.22);
+        }
+      </style>
       <div class="trigger-icon" id="trigger-icon" title="点击展开，拖动调整">
-        <span class="hover-close" id="hover-close" title="彻底关闭">✖</span>
-        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><path d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>
+        <span class="hover-close" id="hover-close" title="关闭">✕</span>
+        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="5" y="4.5" width="10.5" height="14" rx="2.4"></rect>
+          <path d="M8 9h4.5M8 12h4.5M8 15h3"></path>
+          <path d="M17 6.5v4M15 8.5h4"></path>
+        </svg>
       </div>
-
-    <div class="panel" id="panel">
-      <div class="panel-header">
-        <h3>📋 填表数据</h3>
-        <span class="close-panel" id="close-panel" title="彻底关闭">✖</span>
+      <div class="panel" id="panel">
+        <div class="panel-header">
+          <h3>填表数据</h3>
+          <span class="close-panel" id="close-panel" title="关闭">✕</span>
+        </div>
+        <div class="panel-content" id="widget-list"></div>
+        <div class="panel-footer">
+          <button class="btn-fill" id="widget-do-fill">一键智能填充</button>
+        </div>
       </div>
-      <div class="panel-content" id="widget-list"></div>
-      <div class="panel-footer">
-        <button class="btn-fill" id="widget-do-fill">一键智能填充</button>
-      </div>
-    </div>
-  `;
+    `;
 
-  const icon = shadowRoot.getElementById('trigger-icon');
-  const panel = shadowRoot.getElementById('panel');
-  let isDraggingIcon = false, startX, startY, initialX, initialY;
+    const icon = shadowRoot.getElementById('trigger-icon');
+    const panel = shadowRoot.getElementById('panel');
+    const list = shadowRoot.getElementById('widget-list');
+    let isDraggingIcon = false;
+    let startX = 0;
+    let startY = 0;
+    let initialX = 0;
+    let initialY = 0;
 
-  icon.onmousedown = (e) => {
-    isDraggingIcon = false;
-    startX = e.clientX; startY = e.clientY;
-    const rect = widgetContainer.getBoundingClientRect();
-    initialX = rect.left; initialY = rect.top;
+    snapWidgetToViewport(widgetContainer);
 
-    const move = (me) => {
-      if (Math.abs(me.clientX - startX) > 5 || Math.abs(me.clientY - startY) > 5) {
-        isDraggingIcon = true;
-        const margin = 10;
-        const newLeft = Math.min(Math.max(initialX + (me.clientX - startX), margin), window.innerWidth - widgetContainer.offsetWidth - margin);
-        const newTop  = Math.min(Math.max(initialY + (me.clientY - startY), margin), window.innerHeight - widgetContainer.offsetHeight - margin);
-        widgetContainer.style.left = newLeft + 'px';
-        widgetContainer.style.top  = newTop  + 'px';
-        widgetContainer.style.right = 'auto';
+    icon.onmousedown = (e) => {
+      if (e.button !== 0) return;
+      isDraggingIcon = false;
+      startX = e.clientX;
+      startY = e.clientY;
+      const rect = widgetContainer.getBoundingClientRect();
+      initialX = rect.left;
+      initialY = rect.top;
+
+      const move = (me) => {
+        if (Math.abs(me.clientX - startX) > 5 || Math.abs(me.clientY - startY) > 5) {
+          isDraggingIcon = true;
+          panel.classList.remove('open');
+          const newLeft = clamp(initialX + (me.clientX - startX), WIDGET_MARGIN, window.innerWidth - widgetContainer.offsetWidth - WIDGET_MARGIN);
+          const newTop = clamp(initialY + (me.clientY - startY), WIDGET_MARGIN, window.innerHeight - widgetContainer.offsetHeight - WIDGET_MARGIN);
+          widgetContainer.style.left = `${newLeft}px`;
+          widgetContainer.style.top = `${newTop}px`;
+          widgetContainer.style.right = 'auto';
+          widgetContainer.style.bottom = 'auto';
+        }
+      };
+
+      const up = () => {
+        document.removeEventListener('mousemove', move);
+        document.removeEventListener('mouseup', up);
+        snapWidgetToViewport(widgetContainer, true);
+      };
+
+      document.addEventListener('mousemove', move);
+      document.addEventListener('mouseup', up);
+    };
+
+    icon.onclick = (e) => {
+      if (e.target.id === 'hover-close') return;
+      if (!isDraggingIcon) {
+        panel.classList.toggle('open');
+        if (panel.classList.contains('open')) applyPanelPlacement(widgetContainer, panel);
       }
     };
-    const up = () => {
-      document.removeEventListener('mousemove', move);
-      document.removeEventListener('mouseup', up);
-      
-      // Edge snapping (only snap if within 100px of edge)
-      const rect = widgetContainer.getBoundingClientRect();
-      const T = 100; // threshold
-      const w = widgetContainer.offsetWidth;
-      const h = widgetContainer.offsetHeight;
 
-      widgetContainer.style.transition = 'left 0.3s cubic-bezier(0.25,1,0.5,1), top 0.3s cubic-bezier(0.25,1,0.5,1)';
-      if (rect.left < T)                             widgetContainer.style.left = '10px';
-else if (window.innerWidth - rect.right < T) widgetContainer.style.left = (window.innerWidth - w - 10) + 'px';
-      if (rect.top  < T)                             widgetContainer.style.top  = '10px';
-      else if (window.innerHeight - rect.bottom < T) widgetContainer.style.top  = (window.innerHeight - h) + 'px';
-      setTimeout(() => { widgetContainer.style.transition = ''; }, 300);
+    shadowRoot.getElementById('hover-close').onclick = (e) => {
+      e.stopPropagation();
+      hideWidgetForTab(widgetContainer, panel);
     };
-    document.addEventListener('mousemove', move);
-    document.addEventListener('mouseup', up);
-  };
 
-  icon.onclick = (e) => {
-    if (e.target.id === 'hover-close') return;
-    if (!isDraggingIcon) panel.classList.toggle('open');
-  };
+    shadowRoot.getElementById('close-panel').onclick = (e) => {
+      e.stopPropagation();
+      hideWidgetForTab(widgetContainer, panel);
+    };
 
-  shadowRoot.getElementById('hover-close').onclick = (e) => {
-    e.stopPropagation();
-    widgetContainer.style.display = 'none';
-  };
+    shadowRoot.getElementById('widget-do-fill').onclick = () => {
+      const count = triggerGlobalFill(cachedData);
+      fillAllIframes(cachedData, 700);
+      alert(`已填充 ${count} 个字段`);
+    };
 
-  shadowRoot.getElementById('close-panel').onclick = (e) => {
-    e.stopPropagation();
-    widgetContainer.style.display = 'none';
-  };
+    list.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      const draggingItem = shadowRoot.querySelector('.dragging');
+      const siblings = [...list.querySelectorAll('.item:not(.dragging)')];
+      const nextSibling = siblings.find((sibling) => e.clientY <= sibling.getBoundingClientRect().top + sibling.getBoundingClientRect().height / 2);
+      list.insertBefore(draggingItem, nextSibling);
+    });
 
-  shadowRoot.getElementById('widget-do-fill').onclick = () => {
-    const count = triggerGlobalFill(cachedData);
-    alert(`填充了 ${count} 个字段`);
-  };
-
-  // 简单的拖拽排序逻辑
-  const list = shadowRoot.getElementById('widget-list');
-  list.addEventListener('dragover', e => {
-    e.preventDefault();
-    const draggingItem = shadowRoot.querySelector('.dragging');
-    const siblings = [...list.querySelectorAll('.item:not(.dragging)')];
-    const nextSibling = siblings.find(sibling => e.clientY <= sibling.getBoundingClientRect().top + sibling.getBoundingClientRect().height / 2);
-    list.insertBefore(draggingItem, nextSibling);
-  });
+    window.addEventListener('resize', () => {
+      if (widgetDismissed || !document.body.contains(widgetContainer)) return;
+      snapWidgetToViewport(widgetContainer);
+      if (panel.classList.contains('open')) applyPanelPlacement(widgetContainer, panel);
+    });
 
     updateWidgetContent();
-  }); // End check_lock
+  });
 }
 
 function updateWidgetContent() {
   if (!shadowRoot) return;
   const list = shadowRoot.querySelector('#widget-list');
+  if (!list) return;
+
   const items = [];
-  
-  // 基础字段预览 - 只显示有值的
-  FIELD_RULES.forEach(rule => {
+  FIELD_RULES.forEach((rule) => {
     const val = cachedData ? getNestedValue(cachedData, rule.path) : '';
-    if (val && String(val).trim()) {
-      items.push({ label: rule.label || rule.keys[0], val: String(val) });
-    }
+    if (val && String(val).trim()) items.push({ label: rule.label || rule.keys[0], val: String(val) });
   });
 
-  // 自定义字段预览 - 只显示有值的
   if (cachedData && cachedData.custom) {
-    Object.keys(cachedData.custom).forEach(key => {
+    Object.keys(cachedData.custom).forEach((key) => {
       const val = cachedData.custom[key];
-      if (val && String(val).trim()) {
-        items.push({ label: key, val: String(val) });
-      }
+      if (val && String(val).trim()) items.push({ label: key, val: String(val) });
     });
   }
 
-  list.innerHTML = items.map(item => `
+  list.innerHTML = items.map((item) => `
     <div class="item" draggable="true" data-val="${item.val.replace(/"/g, '&quot;')}">
       <label>${item.label}</label>
       <span>${item.val}</span>
       <div class="copy-tip">已复制</div>
     </div>
-  `).join('') || '<div style="text-align:center; color:#999; padding:20px; font-size:12px;">暂无数据，请在插件菜单中填写</div>';
+  `).join('') || '<div style="text-align:center; color:#999; padding:20px; font-size:12px;">暂无数据，请先在插件弹窗中填写</div>';
 
-  list.querySelectorAll('.item').forEach(el => {
-    el.onclick = (e) => {
+  list.querySelectorAll('.item').forEach((el) => {
+    el.onclick = () => {
       navigator.clipboard.writeText(el.dataset.val).then(() => {
         const tip = el.querySelector('.copy-tip');
         tip.style.opacity = '1';
-        setTimeout(() => { tip.style.opacity = '0'; }, 1000);
+        setTimeout(() => {
+          tip.style.opacity = '0';
+        }, 1000);
       });
     };
     el.addEventListener('dragstart', () => el.classList.add('dragging'));
